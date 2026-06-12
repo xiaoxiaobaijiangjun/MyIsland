@@ -1,0 +1,1075 @@
+use crate::core::smtc::MediaInfo;
+use crate::icons::arrows::draw_arrow_right;
+use crate::icons::controls::{draw_control_triangle, draw_pause_button, draw_play_button};
+use crate::utils::font::{DrawTextCachedParams, FontManager};
+use crate::utils::physics::Spring;
+use crate::utils::scroll::{ScrollDrawParams, ScrollText};
+use skia_safe::canvas::SrcRectConstraint;
+use skia_safe::{
+    Canvas, Color, Data, FilterMode, FontStyle, Image, MipmapMode, Paint, Point, RRect, Rect,
+    SamplingOptions, TileMode, gradient_shader, image_filters,
+};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    static IMG_CACHE: RefCell<Option<(String, Image)>> = const { RefCell::new(None) };
+    static COLOR_CACHE: RefCell<HashMap<String, Vec<Color>>> = RefCell::new(HashMap::new());
+    static VIZ_HEIGHTS: RefCell<[f32; 6]> = const { RefCell::new([3.0; 6]) };
+    static PROGRESS_SMOOTH: RefCell<f32> = const { RefCell::new(-1.0) };
+    static PAUSE_ANIM: RefCell<f32> = const { RefCell::new(0.0) };
+    static PAUSE_SPRING: RefCell<Spring> = RefCell::new(Spring::new(1.0));
+    static PREV_SKIP_ANIM: RefCell<Option<std::time::Instant>> = const { RefCell::new(None) };
+    static NEXT_SKIP_ANIM: RefCell<Option<std::time::Instant>> = const { RefCell::new(None) };
+    static LOCAL_PLAY_STATE: RefCell<Option<(bool, std::time::Instant)>> = const { RefCell::new(None) };
+    static TITLE_SCROLL: RefCell<ScrollText> = RefCell::new(ScrollText::new());
+    static ARTIST_SCROLL: RefCell<ScrollText> = RefCell::new(ScrollText::new());
+    static COVER_FLIP_ANIM: RefCell<Option<std::time::Instant>> = const { RefCell::new(None) };
+    static COVER_FLIP_OLD_IMG: RefCell<Option<Image>> = const { RefCell::new(None) };
+    static PROGRESS_HOVER: RefCell<(bool, f32)> = const { RefCell::new((false, 0.0)) };
+    static PROGRESS_DRAGGING: RefCell<bool> = const { RefCell::new(false) };
+    static COVER_ROTATION: RefCell<f32> = const { RefCell::new(0.0) };
+}
+
+pub fn set_progress_dragging(active: bool) {
+    PROGRESS_DRAGGING.with(|cell| {
+        *cell.borrow_mut() = active;
+    });
+}
+
+pub fn trigger_pause_click(current_is_playing: bool) {
+    PAUSE_SPRING.with(|cell| {
+        let mut s = cell.borrow_mut();
+        s.velocity = -0.25;
+    });
+    LOCAL_PLAY_STATE.with(|cell| {
+        *cell.borrow_mut() = Some((!current_is_playing, std::time::Instant::now()));
+    });
+}
+
+pub fn trigger_prev_click() {
+    PREV_SKIP_ANIM.with(|cell| {
+        *cell.borrow_mut() = Some(std::time::Instant::now());
+    });
+}
+
+pub fn trigger_next_click() {
+    NEXT_SKIP_ANIM.with(|cell| {
+        *cell.borrow_mut() = Some(std::time::Instant::now());
+    });
+}
+
+fn ease_out_back(t: f32) -> f32 {
+    let c1 = 1.70158_f32;
+    let c3 = c1 + 1.0;
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+pub fn trigger_cover_flip() {
+    let old_img = IMG_CACHE.with(|cache| cache.borrow().as_ref().map(|(_, img)| img.clone()));
+    COVER_FLIP_OLD_IMG.with(|cell| {
+        *cell.borrow_mut() = old_img;
+    });
+    COVER_FLIP_ANIM.with(|cell| {
+        *cell.borrow_mut() = Some(std::time::Instant::now());
+    });
+}
+
+pub fn set_progress_hover(active: bool) {
+    PROGRESS_HOVER.with(|cell| {
+        cell.borrow_mut().0 = active;
+    });
+}
+
+pub fn get_pause_btn_rect(
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    cover_shape: &str,
+) -> (f32, f32, f32, f32) {
+    let hs = (h / 200.0).min(1.0);
+    let (img_size, img_y) = if cover_shape == "circle" {
+        let s = 72.0 * scale * hs * 1.08;
+        let y = oy + 24.0 * scale * hs - (s - 72.0 * scale * hs) / 2.0;
+        (s, y)
+    } else {
+        (72.0 * scale * hs, oy + 24.0 * scale * hs)
+    };
+    let bar_y = img_y + img_size + 18.0 * scale * hs;
+    let btn_cy = bar_y + 42.0 * scale * hs;
+    let hit = 40.0 * scale;
+    let btn_cx = ox + w / 2.0;
+    (btn_cx - hit / 2.0, btn_cy - hit / 2.0, hit, hit)
+}
+
+pub fn get_prev_btn_rect(
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    cover_shape: &str,
+) -> (f32, f32, f32, f32) {
+    let hs = (h / 200.0).min(1.0);
+    let (img_size, img_y) = if cover_shape == "circle" {
+        let s = 72.0 * scale * hs * 1.08;
+        let y = oy + 24.0 * scale * hs - (s - 72.0 * scale * hs) / 2.0;
+        (s, y)
+    } else {
+        (72.0 * scale * hs, oy + 24.0 * scale * hs)
+    };
+    let bar_y = img_y + img_size + 18.0 * scale * hs;
+    let btn_cy = bar_y + 42.0 * scale * hs;
+    let hit = 36.0 * scale;
+    let btn_cx = ox + w / 2.0 - 75.0 * scale;
+    (btn_cx - hit / 2.0, btn_cy - hit / 2.0, hit, hit)
+}
+
+pub fn get_next_btn_rect(
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    cover_shape: &str,
+) -> (f32, f32, f32, f32) {
+    let hs = (h / 200.0).min(1.0);
+    let (img_size, img_y) = if cover_shape == "circle" {
+        let s = 72.0 * scale * hs * 1.08;
+        let y = oy + 24.0 * scale * hs - (s - 72.0 * scale * hs) / 2.0;
+        (s, y)
+    } else {
+        (72.0 * scale * hs, oy + 24.0 * scale * hs)
+    };
+    let bar_y = img_y + img_size + 18.0 * scale * hs;
+    let btn_cy = bar_y + 42.0 * scale * hs;
+    let hit = 36.0 * scale;
+    let btn_cx = ox + w / 2.0 + 75.0 * scale;
+    (btn_cx - hit / 2.0, btn_cy - hit / 2.0, hit, hit)
+}
+
+pub fn get_progress_bar_rect(
+    ox: f32,
+    oy: f32,
+    w: f32,
+    _media: &MediaInfo,
+    music_active: bool,
+    scale: f32,
+    cover_shape: &str,
+) -> Option<(f32, f32, f32, f32)> {
+    if !music_active {
+        return None;
+    }
+    let (img_size, img_x, img_y) = if cover_shape == "circle" {
+        let s = 72.0 * scale * 1.08;
+        let x = ox + 28.0 * scale - (s - 72.0 * scale) / 2.0;
+        let y = oy + 24.0 * scale - (s - 72.0 * scale) / 2.0;
+        (s, x, y)
+    } else {
+        (72.0 * scale, ox + 28.0 * scale, oy + 24.0 * scale)
+    };
+    let bar_y = img_y + img_size + 18.0 * scale;
+    let time_w = 36.0 * scale;
+    let bar_full_left = img_x;
+    let bar_full_right = img_x + w - 48.0 * scale;
+    let bar_left = bar_full_left + time_w + 4.0 * scale;
+    let bar_right = bar_full_right - time_w - 4.0 * scale;
+    let hit_h = 16.0 * scale;
+    Some((bar_left, bar_right, bar_y - hit_h / 2.0, hit_h))
+}
+
+pub fn draw_text_cached(params: DrawTextCachedParams<'_>) {
+    FontManager::global().draw_text_cached(params);
+}
+
+pub fn get_cached_media_image(media: &MediaInfo) -> Option<Image> {
+    get_cached_media_image_with_key(media).map(|(img, _)| img)
+}
+
+pub fn get_cached_media_image_with_key(media: &MediaInfo) -> Option<(Image, String)> {
+    if media.title.is_empty() {
+        return None;
+    }
+    let cache_key = format!("{}-{}", media.title, media.album);
+
+    let mut result: Option<(Image, String)> = None;
+    IMG_CACHE.with(|cache| {
+        let mut cache_mut = cache.borrow_mut();
+        if let Some((key, img)) = cache_mut.as_ref()
+            && key == &cache_key
+        {
+            result = Some((img.clone(), key.clone()));
+            return;
+        }
+        if let Some(ref bytes_arc) = media.thumbnail {
+            let data = Data::new_copy(bytes_arc);
+            if let Some(image) = Image::from_encoded(data) {
+                *cache_mut = Some((cache_key.clone(), image.clone()));
+                result = Some((image, cache_key));
+            }
+        }
+    });
+    if result.is_none() {
+        COVER_FLIP_OLD_IMG.with(|cell| {
+            if let Some(old_img) = cell.borrow().as_ref() {
+                result = Some((
+                    old_img.clone(),
+                    format!("old_cover-{}-{}", media.title, media.album),
+                ));
+            }
+        });
+    }
+    result
+}
+
+pub fn get_media_palette(media: &MediaInfo) -> Vec<Color> {
+    if let Some((img, cache_key)) = get_cached_media_image_with_key(media) {
+        get_palette_from_image(&img, &cache_key)
+    } else {
+        vec![
+            Color::from_rgb(180, 180, 180),
+            Color::from_rgb(100, 100, 100),
+        ]
+    }
+}
+
+pub fn clear_cover_cache() {
+    IMG_CACHE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    COVER_FLIP_OLD_IMG.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+pub struct DrawMusicPageParams<'a> {
+    pub canvas: &'a Canvas,
+    pub ox: f32,
+    pub oy: f32,
+    pub w: f32,
+    pub h: f32,
+    pub alpha: u8,
+    pub media: &'a MediaInfo,
+    pub music_active: bool,
+    pub view_offset: f32,
+    pub scale: f32,
+    pub expansion_progress: f32,
+    pub viz_h_scale: f32,
+    pub use_blur: bool,
+    pub font_size: f32,
+    pub cover_shape: &'a str,
+    pub cover_rotate: bool,
+    pub dt: f32,
+    pub text_color: Color,
+    pub text_color_sec: Color,
+    pub palette: Vec<Color>,
+}
+
+pub struct DrawVisualizerParams<'a> {
+    pub canvas: &'a Canvas,
+    pub x: f32,
+    pub y: f32,
+    pub alpha: u8,
+    pub is_playing: bool,
+    pub palette: &'a [Color],
+    pub spectrum: &'a [f32; 6],
+    pub w_scale: f32,
+    pub h_scale: f32,
+    pub smooth_factors: (f32, f32),
+}
+
+pub fn draw_music_page(params: DrawMusicPageParams<'_>) -> bool {
+    let DrawMusicPageParams {
+        canvas,
+        ox,
+        oy,
+        w,
+        h,
+        alpha,
+        media,
+        music_active,
+        view_offset,
+        scale,
+        expansion_progress,
+        viz_h_scale,
+        use_blur,
+        font_size,
+        cover_shape,
+        cover_rotate,
+        dt,
+        text_color,
+        text_color_sec,
+        palette,
+    } = params;
+
+    // Compress layout when expanded height is below design (200px)
+    let height_scale = (h / 200.0).min(1.0);
+    let btn_scale = scale * height_scale;
+
+    let arrow_alpha = (alpha as f32 * (1.0 - view_offset * 5.0).clamp(0.0, 1.0)) as u8;
+    if arrow_alpha > 0 {
+        draw_arrow_right(
+            canvas,
+            ox + w - 12.0 * scale,
+            oy + h / 2.0,
+            arrow_alpha,
+            scale,
+            text_color,
+        );
+    }
+    let base_img_size = 72.0 * scale * height_scale;
+    let (img_size, img_x, img_y) = if cover_shape == "circle" {
+        let s = base_img_size * 1.08;
+        let x = ox + 28.0 * scale - (s - base_img_size) / 2.0;
+        let y = oy + 24.0 * scale * height_scale - (s - base_img_size) / 2.0;
+        (s, x, y)
+    } else {
+        (base_img_size, ox + 28.0 * scale, oy + 24.0 * scale * height_scale)
+    };
+    let image_to_draw = if music_active {
+        get_cached_media_image(media)
+    } else {
+        None
+    };
+
+    let pause_s = PAUSE_SPRING.with(|cell| cell.borrow().value);
+    let mut effective_is_playing = media.is_playing;
+    LOCAL_PLAY_STATE.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if let Some((opt_val, time)) = *opt {
+            if media.is_playing == opt_val || time.elapsed().as_millis() > 2000 {
+                *opt = None;
+            } else {
+                effective_is_playing = opt_val;
+            }
+        }
+    });
+
+    let pause_t = PAUSE_ANIM.with(|cell| {
+        let mut v = cell.borrow_mut();
+        let target = if effective_is_playing { 1.0_f32 } else { 0.0 };
+        if pause_s < 0.15 {
+            *v = target;
+        } else {
+            *v += (target - *v) * 0.12;
+            if (*v - target).abs() < 0.005 {
+                *v = target;
+            }
+        }
+        *v
+    });
+
+    let cover_scale = 0.85 + 0.15 * pause_t;
+    let cover_brightness = 0.75 + 0.25 * pause_t;
+
+    let (flip_scale_x, flip_blur_sigma, flip_use_old) = COVER_FLIP_ANIM.with(|cell| {
+        let start = *cell.borrow();
+        match start {
+            Some(s) => {
+                let t = (s.elapsed().as_secs_f32() / 0.5).min(1.0);
+                if t >= 1.0 {
+                    *cell.borrow_mut() = None;
+                    (1.0_f32, 0.0_f32, false)
+                } else {
+                    let cos_val = (t * std::f32::consts::PI).cos();
+                    let sx = cos_val.abs().max(0.05);
+                    let blur = (1.0 - cos_val.abs()) * 10.0 * scale;
+                    (sx, blur, cos_val > 0.0)
+                }
+            }
+            None => (1.0, 0.0, false),
+        }
+    });
+
+    let flip_old_img = if flip_use_old {
+        COVER_FLIP_OLD_IMG.with(|cell| cell.borrow().clone())
+    } else {
+        None
+    };
+
+    let cover_img = if flip_use_old {
+        flip_old_img.or(image_to_draw.clone())
+    } else {
+        image_to_draw.clone()
+    };
+
+    canvas.save();
+    let img_cx = img_x + img_size / 2.0;
+    let img_cy = img_y + img_size / 2.0;
+    canvas.translate((img_cx, img_cy));
+
+    let is_rotating = cover_rotate && cover_shape == "circle" && effective_is_playing;
+    let rotation_angle = COVER_ROTATION.with(|cell| {
+        let mut angle = cell.borrow_mut();
+        if is_rotating {
+            *angle += 0.5 * dt;
+            if *angle >= 360.0 {
+                *angle -= 360.0;
+            }
+        }
+        *angle
+    });
+
+    if cover_rotate && cover_shape == "circle" {
+        canvas.rotate(rotation_angle, None);
+    }
+
+    canvas.scale((cover_scale * flip_scale_x, cover_scale));
+    canvas.translate((-img_cx, -img_cy));
+
+    if flip_blur_sigma > 0.1 && use_blur {
+        let mut blur_paint = Paint::default();
+        blur_paint.set_image_filter(image_filters::blur(
+            (flip_blur_sigma, flip_blur_sigma * 0.3),
+            None,
+            None,
+            None,
+        ));
+        canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&blur_paint));
+    }
+
+    if cover_shape == "circle" {
+        canvas.clip_rrect(
+            RRect::new_rect_xy(
+                Rect::from_xywh(img_x, img_y, img_size, img_size),
+                img_size / 2.0,
+                img_size / 2.0,
+            ),
+            skia_safe::ClipOp::Intersect,
+            true,
+        );
+    } else {
+        canvas.clip_rrect(
+            RRect::new_rect_xy(
+                Rect::from_xywh(img_x, img_y, img_size, img_size),
+                14.0 * scale,
+                14.0 * scale,
+            ),
+            skia_safe::ClipOp::Intersect,
+            true,
+        );
+    }
+    if let Some(img) = cover_img {
+        let mut img_paint = Paint::default();
+        img_paint.set_anti_alias(true);
+        let final_alpha = (alpha as f32 * cover_brightness) / 255.0;
+        img_paint.set_alpha_f(final_alpha);
+        let img_w = img.width() as f32;
+        let img_h = img.height() as f32;
+        let src_rect = if img_w > 0.0 && img_h > 0.0 {
+            let aspect = img_w / img_h;
+            let src: Rect = if aspect > 1.0 {
+                let crop_w = img_h;
+                let offset_x = (img_w - crop_w) / 2.0;
+                Rect::from_xywh(offset_x, 0.0, crop_w, img_h)
+            } else {
+                let crop_h = img_w;
+                let offset_y = (img_h - crop_h) / 2.0;
+                Rect::from_xywh(0.0, offset_y, img_w, crop_h)
+            };
+            Some(src)
+        } else {
+            None
+        };
+        canvas.draw_image_rect_with_sampling_options(
+            &img,
+            src_rect.as_ref().map(|r| (r, SrcRectConstraint::Fast)),
+            Rect::from_xywh(img_x, img_y, img_size, img_size),
+            SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+            &img_paint,
+        );
+    } else {
+        draw_placeholder(canvas, img_x, img_y, img_size, alpha, scale, text_color);
+    }
+    if flip_blur_sigma > 0.1 && use_blur {
+        canvas.restore();
+    }
+    canvas.restore();
+    let text_x = img_x + img_size + 16.0 * scale;
+    let max_text_w = w - (text_x - ox) - 100.0 * scale;
+    let title_y = img_y + 26.0 * scale * height_scale;
+    let mut text_paint = Paint::default();
+    text_paint.set_anti_alias(true);
+    let title = if !music_active || media.title.is_empty() {
+        "No Music playing"
+    } else {
+        &media.title
+    };
+    let artist = if !music_active || media.artist.is_empty() {
+        "Unknown Artist"
+    } else {
+        &media.artist
+    };
+
+    text_paint.set_color(Color::from_argb(
+        alpha,
+        text_color.r(),
+        text_color.g(),
+        text_color.b(),
+    ));
+    let title_font_size = if font_size > 0.0 {
+        font_size * scale
+    } else {
+        15.0 * scale * height_scale
+    };
+    let title_style = FontStyle::bold();
+
+    TITLE_SCROLL.with(|cell| {
+        let mut scroll = cell.borrow_mut();
+        scroll.draw(ScrollDrawParams {
+            canvas,
+            text: title,
+            x: text_x,
+            y: title_y,
+            max_w: max_text_w,
+            size: title_font_size,
+            style: title_style,
+            paint: &text_paint,
+            scale,
+        });
+    });
+
+    text_paint.set_color(Color::from_argb(
+        (alpha as f32 * 0.6) as u8,
+        text_color_sec.r(),
+        text_color_sec.g(),
+        text_color_sec.b(),
+    ));
+    let artist_y = title_y + 22.0 * scale * height_scale;
+    let artist_font_size = if font_size > 0.0 {
+        font_size * scale
+    } else {
+        15.0 * scale * height_scale
+    };
+    let artist_style = FontStyle::normal();
+
+    ARTIST_SCROLL.with(|cell| {
+        let mut scroll = cell.borrow_mut();
+        scroll.draw(ScrollDrawParams {
+            canvas,
+            text: artist,
+            x: text_x,
+            y: artist_y,
+            max_w: max_text_w,
+            size: artist_font_size,
+            style: artist_style,
+            paint: &text_paint,
+            scale,
+        });
+    });
+
+    if music_active {
+        let bar_y = img_y + img_size + 18.0 * scale * height_scale;
+        let time_font_size = if font_size > 0.0 {
+            font_size * 0.67 * scale
+        } else {
+            10.0 * scale * height_scale
+        };
+        let time_w = 36.0 * scale;
+
+        let current_pos_ms = if media.is_playing {
+            media
+                .position_ms
+                .saturating_add(media.last_update.elapsed().as_millis() as u64)
+        } else {
+            media.position_ms
+        };
+        let duration_ms = media.effective_duration_ms();
+        let current_pos_ms = if duration_ms > 0 {
+            current_pos_ms.min(duration_ms)
+        } else {
+            current_pos_ms
+        };
+        let raw_progress = if duration_ms > 0 {
+            current_pos_ms as f32 / duration_ms as f32
+        } else {
+            0.0
+        };
+
+        let progress = PROGRESS_SMOOTH.with(|cell| {
+            let mut smooth = cell.borrow_mut();
+            let dragging = PROGRESS_DRAGGING.with(|d| *d.borrow());
+            if dragging || *smooth < 0.0 || (*smooth < 0.02 && raw_progress > 0.02) {
+                *smooth = raw_progress;
+            } else {
+                let diff = (raw_progress - *smooth).abs();
+                if diff > 0.3 {
+                    *smooth = raw_progress;
+                } else {
+                    *smooth += (raw_progress - *smooth) * 0.15;
+                }
+            }
+            *smooth
+        });
+
+        let elapsed_secs = (current_pos_ms / 1000) as u32;
+        let elapsed_str = format!("{}:{:02}", elapsed_secs / 60, elapsed_secs % 60);
+        let remaining_str = if duration_ms > 0 {
+            let remaining_secs = (duration_ms.saturating_sub(current_pos_ms) / 1000) as u32;
+            format!("-{}:{:02}", remaining_secs / 60, remaining_secs % 60)
+        } else {
+            "--:--".to_string()
+        };
+
+        let bar_full_left = img_x;
+        let bar_full_right = img_x + w - 48.0 * scale;
+
+        let bar_left = bar_full_left + time_w + 4.0 * scale;
+        let bar_right = bar_full_right - time_w - 4.0 * scale;
+        let bar_total_w = bar_right - bar_left;
+
+        let hover_t = PROGRESS_HOVER.with(|cell| {
+            let mut state = cell.borrow_mut();
+            let target = if state.0 { 1.0_f32 } else { 0.0 };
+            state.1 += (target - state.1) * 0.18;
+            if (state.1 - target).abs() < 0.005 {
+                state.1 = target;
+            }
+            state.1
+        });
+
+        let bar_h = (5.5 + 3.5 * hover_t) * scale;
+        let bar_center_y = bar_y;
+        let bar_radius = bar_h / 2.0;
+
+        let text_baseline_y = bar_center_y + time_font_size * 0.35;
+
+        let time_alpha_factor = 0.5 + 0.5 * hover_t;
+        let mut time_paint = Paint::default();
+        time_paint.set_anti_alias(true);
+        time_paint.set_color(Color::from_argb(
+            (alpha as f32 * time_alpha_factor) as u8,
+            text_color.r(),
+            text_color.g(),
+            text_color.b(),
+        ));
+
+        let elapsed_w = FontManager::global().measure_text_cached(
+            &elapsed_str,
+            time_font_size,
+            FontStyle::normal(),
+        );
+        draw_text_cached(DrawTextCachedParams {
+            canvas,
+            text: &elapsed_str,
+            x: bar_left - elapsed_w - 6.0 * scale,
+            y: text_baseline_y,
+            size: time_font_size,
+            bold: false,
+            paint: &time_paint,
+        });
+
+        draw_text_cached(DrawTextCachedParams {
+            canvas,
+            text: &remaining_str,
+            x: bar_right + 6.0 * scale,
+            y: text_baseline_y,
+            size: time_font_size,
+            bold: false,
+            paint: &time_paint,
+        });
+
+        let mut track_paint = Paint::default();
+        track_paint.set_anti_alias(true);
+        track_paint.set_color(Color::from_argb(
+            (alpha as f32 * 0.25) as u8,
+            text_color.r(),
+            text_color.g(),
+            text_color.b(),
+        ));
+        let track_rect = Rect::from_xywh(bar_left, bar_center_y - bar_h / 2.0, bar_total_w, bar_h);
+        canvas.draw_round_rect(track_rect, bar_radius, bar_radius, &track_paint);
+
+        let filled_w = (bar_total_w * progress).max(bar_h);
+        let mut fill_paint = Paint::default();
+        fill_paint.set_anti_alias(true);
+        fill_paint.set_color(Color::from_argb(
+            alpha,
+            text_color.r(),
+            text_color.g(),
+            text_color.b(),
+        ));
+        let fill_rect = Rect::from_xywh(bar_left, bar_center_y - bar_h / 2.0, filled_w, bar_h);
+        let fill_rrect = RRect::new_rect_radii(
+            fill_rect,
+            &[
+                Point::new(bar_radius, bar_radius),
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 0.0),
+                Point::new(bar_radius, bar_radius),
+            ],
+        );
+        canvas.draw_rrect(fill_rrect, &fill_paint);
+
+        let btn_cx = ox + w / 2.0;
+        let btn_cy = bar_center_y + bar_h / 2.0 + 42.0 * scale * height_scale;
+        let skip_gap = 75.0 * btn_scale;
+
+        let prev_t = PREV_SKIP_ANIM.with(|cell| {
+            let start = *cell.borrow();
+            match start {
+                Some(s) => {
+                    let t = s.elapsed().as_secs_f32() / 0.5;
+                    if t >= 1.0 {
+                        *cell.borrow_mut() = None;
+                        return None;
+                    }
+                    Some(t)
+                }
+                None => None,
+            }
+        });
+
+        canvas.save();
+        canvas.translate((btn_cx - skip_gap, btn_cy));
+        canvas.scale((-1.0, 1.0));
+        if let Some(t) = prev_t {
+            let skip_blur = (1.0 - t / 0.3).max(0.0) * 6.0 * btn_scale;
+            if skip_blur > 0.1 && use_blur {
+                let mut blur_paint = Paint::default();
+                blur_paint.set_image_filter(image_filters::blur(
+                    (skip_blur, skip_blur * 0.3),
+                    None,
+                    None,
+                    None,
+                ));
+                canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&blur_paint));
+            }
+
+            let shoot_t = (t / 0.25).min(1.0);
+            let shoot_x = 10.92 * btn_scale + 22.0 * btn_scale * shoot_t;
+            let shoot_alpha = ((alpha as f32) * (1.0 - shoot_t)) as u8;
+            if shoot_alpha > 0 {
+                draw_control_triangle(canvas, shoot_x, 0.0, shoot_alpha, 0.055, btn_scale, text_color);
+            }
+
+            let move_t = (t / 0.55).min(1.0);
+            let mid_x = -10.92 * btn_scale + (10.92 * 2.0) * btn_scale * move_t;
+            let mid_s = 0.050 + (0.055 - 0.050) * move_t;
+            draw_control_triangle(canvas, mid_x, 0.0, alpha, mid_s, btn_scale, text_color);
+
+            let fade_raw = ((t - 0.15) / 0.85).clamp(0.0, 1.0);
+            let fade_eased = ease_out_back(fade_raw);
+            let new_x = -25.0 * btn_scale + (25.0 - 10.92) * btn_scale * fade_eased;
+            let new_alpha = ((alpha as f32) * fade_raw) as u8;
+            if new_alpha > 0 {
+                draw_control_triangle(canvas, new_x, 0.0, new_alpha, 0.050, btn_scale, text_color);
+            }
+
+            if skip_blur > 0.1 && use_blur {
+                canvas.restore();
+            }
+        } else {
+            draw_control_triangle(canvas, -10.92 * btn_scale, 0.0, alpha, 0.050, btn_scale, text_color);
+            draw_control_triangle(canvas, 10.92 * btn_scale, 0.0, alpha, 0.055, btn_scale, text_color);
+        }
+        canvas.restore();
+
+        let (pause_s, pause_blur) = PAUSE_SPRING.with(|cell| {
+            let mut s = cell.borrow_mut();
+            if s.velocity < 0.0 {
+                s.value = (s.value + s.velocity).max(0.01);
+                s.velocity *= 0.8;
+                if s.velocity > -0.01 || s.value <= 0.01 {
+                    s.velocity = 0.0;
+                }
+            } else {
+                s.velocity = (1.0 - s.value) * 0.15;
+                s.value += s.velocity;
+            }
+            (s.value, (s.velocity.abs() * 40.0 * btn_scale).clamp(0.0, 15.0))
+        });
+
+        canvas.save();
+        if pause_blur > 0.1 && use_blur {
+            let mut blur_paint = Paint::default();
+            blur_paint.set_image_filter(image_filters::blur(
+                (pause_blur, pause_blur),
+                None,
+                None,
+                None,
+            ));
+            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&blur_paint));
+        }
+        canvas.translate((btn_cx, btn_cy));
+        canvas.scale((pause_s, pause_s));
+        if pause_t > 0.99 {
+            draw_pause_button(canvas, 0.0, 0.0, alpha, btn_scale, text_color);
+        } else if pause_t < 0.01 {
+            draw_play_button(canvas, 0.0, 0.0, alpha, btn_scale, text_color);
+        } else {
+            let pause_alpha = (alpha as f32 * pause_t) as u8;
+            let play_alpha = (alpha as f32 * (1.0 - pause_t)) as u8;
+
+            if pause_alpha > 0 {
+                draw_pause_button(canvas, 0.0, 0.0, pause_alpha, btn_scale, text_color);
+            }
+
+            if play_alpha > 0 {
+                draw_play_button(canvas, 0.0, 0.0, play_alpha, btn_scale, text_color);
+            }
+        }
+        if pause_blur > 0.1 && use_blur {
+            canvas.restore();
+        }
+        canvas.restore();
+
+        let next_t = NEXT_SKIP_ANIM.with(|cell| {
+            let start = *cell.borrow();
+            match start {
+                Some(s) => {
+                    let t = s.elapsed().as_secs_f32() / 0.5;
+                    if t >= 1.0 {
+                        *cell.borrow_mut() = None;
+                        return None;
+                    }
+                    Some(t)
+                }
+                None => None,
+            }
+        });
+
+        canvas.save();
+        canvas.translate((btn_cx + skip_gap, btn_cy));
+        if let Some(t) = next_t {
+            let skip_blur = (1.0 - t / 0.3).max(0.0) * 6.0 * btn_scale;
+            if skip_blur > 0.1 && use_blur {
+                let mut blur_paint = Paint::default();
+                blur_paint.set_image_filter(image_filters::blur(
+                    (skip_blur, skip_blur * 0.3),
+                    None,
+                    None,
+                    None,
+                ));
+                canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&blur_paint));
+            }
+
+            let shoot_t = (t / 0.25).min(1.0);
+            let shoot_x = 10.92 * btn_scale + 22.0 * btn_scale * shoot_t;
+            let shoot_alpha = ((alpha as f32) * (1.0 - shoot_t)) as u8;
+            if shoot_alpha > 0 {
+                draw_control_triangle(canvas, shoot_x, 0.0, shoot_alpha, 0.055, btn_scale, text_color);
+            }
+
+            let move_t = (t / 0.55).min(1.0);
+            let mid_x = -10.92 * btn_scale + (10.92 * 2.0) * btn_scale * move_t;
+            let mid_s = 0.050 + (0.055 - 0.050) * move_t;
+            draw_control_triangle(canvas, mid_x, 0.0, alpha, mid_s, btn_scale, text_color);
+
+            let fade_raw = ((t - 0.15) / 0.85).clamp(0.0, 1.0);
+            let fade_eased = ease_out_back(fade_raw);
+            let new_x = -25.0 * btn_scale + (25.0 - 10.92) * btn_scale * fade_eased;
+            let new_alpha = ((alpha as f32) * fade_raw) as u8;
+            if new_alpha > 0 {
+                draw_control_triangle(canvas, new_x, 0.0, new_alpha, 0.050, btn_scale, text_color);
+            }
+
+            if skip_blur > 0.1 && use_blur {
+                canvas.restore();
+            }
+        } else {
+            draw_control_triangle(canvas, -10.92 * btn_scale, 0.0, alpha, 0.050, btn_scale, text_color);
+            draw_control_triangle(canvas, 10.92 * btn_scale, 0.0, alpha, 0.055, btn_scale, text_color);
+        }
+        canvas.restore();
+    }
+
+    let viz_x_offset = 17.0 + (45.0 - 17.0) * expansion_progress;
+    draw_visualizer(DrawVisualizerParams {
+        canvas,
+        x: ox + w - viz_x_offset * scale,
+        y: title_y - 4.0 * scale,
+        alpha,
+        is_playing: music_active && media.is_playing,
+        palette: &palette,
+        spectrum: &media.spectrum,
+        w_scale: scale,
+        h_scale: viz_h_scale,
+        smooth_factors: (0.6, 0.08),
+    });
+
+    is_rotating
+}
+
+pub fn draw_visualizer(params: DrawVisualizerParams<'_>) {
+    let DrawVisualizerParams {
+        canvas,
+        x,
+        y,
+        alpha,
+        is_playing,
+        palette,
+        spectrum,
+        w_scale,
+        h_scale,
+        smooth_factors,
+    } = params;
+
+    let (rise, fall) = smooth_factors;
+    let bar_count = 6;
+    let bar_w = 3.0 * w_scale;
+    let spacing = 2.0 * w_scale;
+    let max_h = 28.0 * h_scale;
+    VIZ_HEIGHTS.with(|h_cell| {
+        let mut heights = h_cell.borrow_mut();
+        for i in 0..bar_count {
+            let target = if is_playing {
+                (spectrum[i] * max_h).max(3.0 * h_scale)
+            } else {
+                3.0 * h_scale
+            };
+            if target > heights[i] {
+                heights[i] = heights[i] * (1.0 - rise) + target * rise;
+            } else {
+                heights[i] = heights[i] * (1.0 - fall) + target * fall;
+            }
+            heights[i] = heights[i].max(3.0 * h_scale);
+        }
+        let start_x = x - (bar_count as f32 * (bar_w + spacing)) / 2.0;
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        let colors_with_alpha: Vec<Color> = palette
+            .iter()
+            .map(|c| Color::from_argb(alpha, c.r(), c.g(), c.b()))
+            .collect();
+        if colors_with_alpha.len() >= 2 {
+            let shader = gradient_shader::linear(
+                (
+                    Point::new(start_x, y - max_h / 2.0),
+                    Point::new(start_x + (20.0 * w_scale), y + max_h / 2.0),
+                ),
+                colors_with_alpha.as_slice(),
+                None,
+                TileMode::Mirror,
+                None,
+                None,
+            )
+            .unwrap();
+            paint.set_shader(shader);
+        } else {
+            paint.set_color(colors_with_alpha.first().cloned().unwrap_or(Color::WHITE));
+        }
+        for i in 0..bar_count {
+            let h = heights[i];
+            let rect = Rect::from_xywh(
+                start_x + i as f32 * (bar_w + spacing),
+                y - h / 2.0,
+                bar_w,
+                h,
+            );
+            let r = bar_w / 2.0;
+            canvas.draw_round_rect(rect, r, r, &paint);
+        }
+    });
+}
+
+fn get_palette_from_image(img: &Image, cache_key: &str) -> Vec<Color> {
+    COLOR_CACHE.with(|cache| {
+        let mut cache_mut = cache.borrow_mut();
+        if cache_mut.len() > 50
+            && let Some(oldest_key) = cache_mut.keys().next().cloned()
+        {
+            cache_mut.remove(&oldest_key);
+        }
+        if let Some(palette) = cache_mut.get(cache_key) {
+            return palette.clone();
+        }
+        let mut palette = Vec::new();
+        let info = skia_safe::ImageInfo::new(
+            skia_safe::ISize::new(img.width(), img.height()),
+            skia_safe::ColorType::BGRA8888,
+            skia_safe::AlphaType::Premul,
+            None,
+        );
+        let mut pixels = vec![0u8; (img.width() * img.height() * 4) as usize];
+        if img.read_pixels(
+            &info,
+            &mut pixels,
+            (img.width() * 4) as usize,
+            (0, 0),
+            skia_safe::image::CachingHint::Allow,
+        ) {
+            let step_x = img.width() / 8;
+            let step_y = img.height() / 8;
+            let mut r_total = 0u32;
+            let mut g_total = 0u32;
+            let mut b_total = 0u32;
+            let mut count = 0u32;
+            for y in 1..8 {
+                for x in 1..8 {
+                    let idx = ((y * step_y * img.width() + x * step_x) * 4) as usize;
+                    if idx + 2 < pixels.len() {
+                        b_total += pixels[idx] as u32;
+                        g_total += pixels[idx + 1] as u32;
+                        r_total += pixels[idx + 2] as u32;
+                        count += 1;
+                    }
+                }
+            }
+            if count > 0 {
+                let r_avg = r_total as f32 / count as f32;
+                let g_avg = g_total as f32 / count as f32;
+                let b_avg = b_total as f32 / count as f32;
+
+                let brighten = |r: f32, g: f32, b: f32, factor: f32| -> Color {
+                    let mut r = r * factor;
+                    let mut g = g * factor;
+                    let mut b = b * factor;
+
+                    let brightness = r * 0.299 + g * 0.587 + b * 0.114;
+                    if brightness < 80.0 {
+                        let boost = 80.0 - brightness;
+                        r += boost;
+                        g += boost;
+                        b += boost;
+                    }
+
+                    Color::from_rgb(r.min(255.0) as u8, g.min(255.0) as u8, b.min(255.0) as u8)
+                };
+
+                let primary = brighten(r_avg, g_avg, b_avg, 1.3);
+                let secondary = brighten(r_avg, g_avg, b_avg, 1.5);
+
+                palette.push(primary);
+                palette.push(secondary);
+                palette.push(primary);
+            }
+        }
+        if palette.is_empty() {
+            palette.push(Color::from_rgb(200, 200, 200));
+        }
+        cache_mut.insert(cache_key.to_string(), palette.clone());
+        palette
+    })
+}
+
+fn draw_placeholder(
+    canvas: &Canvas,
+    x: f32,
+    y: f32,
+    size: f32,
+    alpha: u8,
+    scale: f32,
+    text_color: Color,
+) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(Color::from_argb(
+        (alpha as f32 * 0.15) as u8,
+        text_color.r(),
+        text_color.g(),
+        text_color.b(),
+    ));
+    canvas.draw_round_rect(
+        Rect::from_xywh(x, y, size, size),
+        14.0 * scale,
+        14.0 * scale,
+        &paint,
+    );
+
+    let cx = x + size / 2.0;
+    let cy = y + size / 2.0;
+    crate::icons::music::draw_music_icon(canvas, cx, cy, alpha, scale * 1.8, text_color);
+}
