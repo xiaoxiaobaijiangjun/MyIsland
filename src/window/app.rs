@@ -69,6 +69,7 @@ pub struct App {
     win_y: i32,
     frame_count: u64,
     last_media_title: String,
+    show_title_counter: f32,
     last_media_playing: bool,
     current_lyric_text: String,
     old_lyric_text: String,
@@ -130,6 +131,7 @@ impl Default for App {
             win_y: 0,
             frame_count: 0,
             last_media_title: String::new(),
+            show_title_counter: 0.0,
             last_media_playing: false,
             current_lyric_text: String::new(),
             old_lyric_text: String::new(),
@@ -803,18 +805,22 @@ impl App {
         let is_currently_hidden =
             self.auto_hidden || self.manually_hidden || self.spring_hide.value > 0.1;
         let target_base_w = if music_active && !self.expanded && !is_currently_hidden {
+            let show_title_fallback = self.show_title_counter > 0.0;
             let has_visible_lyrics = self.config.show_lyrics
                 && (!self.current_lyric_text.is_empty()
                     || (!self.old_lyric_text.is_empty() && self.lyric_transition < 1.0));
+            let has_text = has_visible_lyrics || show_title_fallback;
 
-            if has_visible_lyrics {
-                if self.config.lyrics_scroll {
-                    let display_text = if !self.current_lyric_text.is_empty() {
-                        &self.current_lyric_text
-                    } else {
-                        &self.old_lyric_text
-                    };
-                    let text_w = self.measure_lyric_text_width(display_text);
+            if has_text {
+                let display_text = if show_title_fallback {
+                    &self.last_media_title
+                } else if !self.current_lyric_text.is_empty() {
+                    &self.current_lyric_text
+                } else {
+                    &self.old_lyric_text
+                };
+                let text_w = self.measure_lyric_text_width(display_text);
+                if has_visible_lyrics && self.config.lyrics_scroll && !show_title_fallback {
                     let natural_w = 60.0 + text_w;
                     let max_w = self.config.lyrics_scroll_max_width;
                     if natural_w > max_w {
@@ -844,12 +850,6 @@ impl App {
                         natural_w.clamp(min_w, max_w)
                     }
                 } else {
-                    let display_text = if !self.current_lyric_text.is_empty() {
-                        &self.current_lyric_text
-                    } else {
-                        &self.old_lyric_text
-                    };
-                    let text_w = self.measure_lyric_text_width(display_text);
                     self.lyric_scroll_offset = 0.0;
                     let min_w = self.config.base_width + 35.0;
                     let w: f32 = 60.0 + text_w;
@@ -1152,6 +1152,18 @@ impl ApplicationHandler for App {
                         if !self.config.audio_gate {
                             media_info.spectrum = [0.0; 6];
                         }
+                        if !media_info.title.is_empty()
+                            && media_info.title != self.last_media_title
+                        {
+                            self.show_title_counter = 180.0;
+                            self.last_media_title = media_info.title.clone();
+                        }
+                        if self.show_title_counter > 0.0 {
+                            self.show_title_counter -= 1.0;
+                            if self.show_title_counter < 0.0 {
+                                self.show_title_counter = 0.0;
+                            }
+                        }
                         let mut music_active = false;
                         if self.config.smtc_enabled && !media_info.title.is_empty() {
                             music_active = true;
@@ -1182,6 +1194,7 @@ impl ApplicationHandler for App {
                                     old_lyric: &self.old_lyric_text,
                                     lyric_transition: self.lyric_transition,
                                     lyric_scroll_offset: self.lyric_scroll_offset,
+                                    show_title_fallback: self.show_title_counter > 0.0,
                                 },
                                 window: crate::core::render::WindowParams {
                                     win_x: self.win_x,
@@ -1505,7 +1518,9 @@ impl ApplicationHandler for App {
                 self.config.water_reminder_start_hour,
                 self.config.water_reminder_end_hour,
             );
-            if self.water.active { window.request_redraw(); }
+            if self.water.active {
+                window.request_redraw();
+            }
         }
 
         let is_paused = music_active && !media.is_playing;
@@ -1538,14 +1553,22 @@ impl ApplicationHandler for App {
             window.request_redraw();
         }
 
-        let target_w = self.compute_lyric_target_width(&window, music_active, is_paused, dt);
+        let target_w = if self.water.active {
+            (self.config.base_width * 2.0).min(self.config.expanded_width) * self.config.global_scale
+        } else {
+            self.compute_lyric_target_width(&window, music_active, is_paused, dt)
+        };
         let target_h = (if self.expanded {
             self.config.expanded_height
+        } else if self.water.active {
+            (self.config.base_height * 2.5).min(self.config.expanded_height)
         } else {
             self.config.base_height
         }) * self.config.global_scale;
         let target_r = if self.expanded {
             32.0 * self.config.global_scale
+        } else if self.water.active {
+            (32.0 * self.config.global_scale).min(target_h / 2.0)
         } else {
             (self.config.base_height * self.config.global_scale) / 2.0
         };
@@ -1556,6 +1579,7 @@ impl ApplicationHandler for App {
         self.spring_view.update_dt(target_view, 0.12, 0.68, dt);
 
         if self.expanded
+            || self.water.active
             || (music_active && media.is_playing)
             || self.spring_w.velocity.abs() > 0.001
             || self.spring_h.velocity.abs() > 0.001

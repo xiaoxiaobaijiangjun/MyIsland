@@ -23,7 +23,7 @@ use winit::window::Window;
 thread_local! {
     static SK_SURFACE: RefCell<Option<SkSurface>> = const { RefCell::new(None) };
     static MINI_COVER_ROTATION: RefCell<f32> = const { RefCell::new(0.0) };
-
+    static WATER_ANIM_TIME: RefCell<f32> = const { RefCell::new(0.0) };
 }
 
 pub struct LayoutParams {
@@ -50,6 +50,7 @@ pub struct LyricsParams<'a> {
     pub old_lyric: &'a str,
     pub lyric_transition: f32,
     pub lyric_scroll_offset: f32,
+    pub show_title_fallback: bool,
 }
 
 pub struct WindowParams {
@@ -118,6 +119,7 @@ pub fn draw_island(
         old_lyric,
         lyric_transition,
         lyric_scroll_offset,
+        show_title_fallback,
     } = lyrics;
     let WindowParams {
         win_x,
@@ -379,34 +381,14 @@ pub fn draw_island(
         widget_animating |= draw_widget_page(canvas, offset_x, offset_y, current_w, current_h, alpha, global_scale, media, font_size, lyrics_delay, dt, text_color);
         canvas.restore();
 
-        // Water reminder full-island overlay
-        if water_active && expanded_alpha_f > 0.5 {
-            canvas.save();
-            canvas.clip_rrect(rrect, ClipOp::Intersect, true);
-
-            let mut bg = Paint::default();
-            bg.set_anti_alias(true);
-            bg.set_color(Color::from_argb(240, 34, 40, 48));
-            canvas.draw_rrect(rrect, &bg);
-
-            let cx = offset_x + current_w / 2.0;
-            let cy = offset_y + current_h / 2.0;
-
-            let title = "💧  Drink Water";
-            draw_text_cached(DrawTextCachedParams { canvas, text: title, x: cx - FontManager::global().measure_text_cached(title, 18.0 * global_scale, skia_safe::FontStyle::normal()) / 2.0, y: cy - 8.0 * global_scale, size: 18.0 * global_scale, bold: true, paint: &{ let mut p = Paint::default(); p.set_anti_alias(true); p.set_color(Color::WHITE); p } });
-
-            let msg = "Tap to dismiss";
-            draw_text_cached(DrawTextCachedParams { canvas, text: msg, x: cx - FontManager::global().measure_text_cached(msg, 11.0 * global_scale, skia_safe::FontStyle::normal()) / 2.0, y: cy + 24.0 * global_scale, size: 11.0 * global_scale, bold: false, paint: &{ let mut p = Paint::default(); p.set_anti_alias(true); p.set_color(Color::from_argb(180, 200, 200, 200)); p } });
-
-            canvas.restore();
-        }
-
+        // Water overlay always on top of expanded pages (removed from here, moved after mini content)
         if blur_filter.is_some() {
             canvas.restore();
         }
         canvas.restore();
     }
-    if mini_alpha_f > 0.01 && current_w > 45.0 * global_scale && music_active {
+    // Mini content - skip when water is active so water overlay can cover everything
+    if !water_active && mini_alpha_f > 0.01 && current_w > 45.0 * global_scale && music_active {
         let alpha = (mini_alpha_f * 255.0) as u8;
         if let Some(image) = get_cached_media_image(media) {
             let base_size = 18.0 * global_scale;
@@ -530,7 +512,7 @@ pub fn draw_island(
                 draw_play_button(canvas, 0.0, 0.0, ctrl_alpha, btn_scale, text_color);
                 canvas.restore();
             }
-        } else if !current_lyric.is_empty() || !old_lyric.is_empty() {
+        } else if !current_lyric.is_empty() || !old_lyric.is_empty() || music_active {
             let lyric_fade_f = (1.0 - expansion_progress * 2.5).clamp(0.0, 1.0);
             let alpha = (alpha as f32 * lyric_fade_f) as u8;
 
@@ -540,10 +522,19 @@ pub fn draw_island(
                 } else {
                     12.0 * global_scale
                 };
+                let (display_text, show_as_title) = if show_title_fallback && music_active {
+                    (media.title.as_str(), true)
+                } else if !current_lyric.is_empty() {
+                    (current_lyric, false)
+                } else if !old_lyric.is_empty() {
+                    (old_lyric, false)
+                } else {
+                    (media.title.as_str(), true)
+                };
                 let space_left = offset_x + 30.0 * global_scale;
                 let space_right = offset_x + current_w - 29.0 * global_scale;
                 let available_w = space_right - space_left;
-                let scrolling = lyric_scroll_offset > 0.0;
+                let scrolling = !show_as_title && lyric_scroll_offset > 0.0;
                 let text_x = if scrolling {
                     space_left - lyric_scroll_offset
                 } else {
@@ -555,7 +546,23 @@ pub fn draw_island(
                 let clip_rect = Rect::from_xywh(space_left, offset_y, available_w, current_h);
                 canvas.clip_rect(clip_rect, ClipOp::Intersect, true);
 
-                if use_blur {
+                if show_as_title {
+                    // Draw title centered, no transition animation
+                    let mut text_paint = Paint::default();
+                    text_paint.set_anti_alias(true);
+                    text_paint.set_color(Color::from_argb(alpha, text_color.r(), text_color.g(), text_color.b()));
+                    let text_y = offset_y + current_h / 2.0 + lyric_font_sz * 0.35;
+                    let lx = text_x - FontManager::global().measure_text_cached(display_text, lyric_font_sz, skia_safe::FontStyle::normal()) / 2.0;
+                    draw_text_cached(DrawTextCachedParams {
+                        canvas,
+                        text: display_text,
+                        x: lx,
+                        y: text_y,
+                        size: lyric_font_sz,
+                        bold: true,
+                        paint: &text_paint,
+                    });
+                } else if use_blur {
                     if lyric_transition < 1.0 && !old_lyric.is_empty() {
                         let mut text_paint = Paint::default();
                         text_paint.set_anti_alias(true);
@@ -714,6 +721,49 @@ pub fn draw_island(
         }
     }
     canvas.restore();
+
+    // Water overlay on top of everything
+    if water_active && expansion_progress > 0.35 {
+        WATER_ANIM_TIME.with(|cell| {
+            *cell.borrow_mut() += dt;
+        });
+        let water_time = WATER_ANIM_TIME.with(|cell| cell.borrow().clone());
+
+        canvas.save();
+        canvas.clip_rrect(rrect, ClipOp::Intersect, true);
+
+        let mut bg = Paint::default();
+        bg.set_anti_alias(true);
+        bg.set_color(Color::from_argb(240, 34, 40, 48));
+        canvas.draw_rrect(rrect, &bg);
+
+        let cx = offset_x + current_w / 2.0;
+        let cy = offset_y + current_h / 2.0;
+
+        // Floating water drops
+        let drop_alpha = ((expanded_alpha_f * 255.0) as f32 * 0.5) as u8;
+        if drop_alpha > 0 {
+            let mut drop_paint = Paint::default();
+            drop_paint.set_anti_alias(true);
+            drop_paint.set_color(Color::from_argb(drop_alpha, 100, 200, 255));
+            for i in 0..5 {
+                let phase = i as f32 * 1.256;
+                let drop_cx = cx + phase.sin() * 30.0 * global_scale;
+                let drop_cy = cy - 10.0 * global_scale + (water_time * 0.05 + phase).sin() * 20.0 * global_scale - 10.0 * global_scale;
+                let drop_r = (3.0 + (i as f32 * 0.8).sin() * 2.0) * global_scale;
+                canvas.draw_circle((drop_cx, drop_cy), drop_r, &drop_paint);
+            }
+        }
+
+        // Title with gentle pulse
+        let title = "💧  Drink Water";
+        let title_font_sz = 20.0 * global_scale;
+        let pulse = 0.85 + 0.15 * (water_time * 0.06).sin();
+        let title_alpha = ((expanded_alpha_f * 255.0) as f32 * pulse) as u8;
+        draw_text_cached(DrawTextCachedParams { canvas, text: title, x: cx - FontManager::global().measure_text_cached(title, title_font_sz, skia_safe::FontStyle::normal()) / 2.0, y: cy - 14.0 * global_scale, size: title_font_sz, bold: true, paint: &{ let mut p = Paint::default(); p.set_anti_alias(true); p.set_color(Color::from_argb(title_alpha, 255, 255, 255)); p } });
+
+        canvas.restore();
+    }
 
     if island_style != "liquid_glass" {
         let mut border_paint = Paint::default();
