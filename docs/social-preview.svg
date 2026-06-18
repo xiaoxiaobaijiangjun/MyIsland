@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="'Segoe UI', 'SF Pro Display', -apple-system, system-ui, sans-serif">
+  <defs>
+    <!-- Background gradient: deep slate -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B1020"/>
+      <stop offset="55%" stop-color="#121A33"/>
+      <stop offset="100%" stop-color="#0A0E1A"/>
+    </linearGradient>
+    <!-- Subtle radial glow -->
+    <radialGradient id="glow" cx="72%" cy="48%" r="48%">
+      <stop offset="0%" stop-color="#FF8A4C" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#FF8A4C" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Island pill gradient (dark glass) -->
+    <linearGradient id="pill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#222C45"/>
+      <stop offset="100%" stop-color="#161E33"/>
+    </linearGradient>
+    <!-- Album art gradient (warm) -->
+    <linearGradient id="art" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FF6B6B"/>
+      <stop offset="100%" stop-color="#FFB347"/>
+    </linearGradient>
+    <!-- Accent gradient for the brand bar -->
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FF8A4C"/>
+      <stop offset="100%" stop-color="#FF4C8B"/>
+    </linearGradient>
+    <!-- Soft shadow under island -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="10" result="off"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- Clip for rounded island -->
+    <clipPath id="islandClip"><rect x="760" y="250" width="380" height="140" rx="70"/></clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+
+  <!-- Faint grid dots for texture -->
+  <g fill="#FFFFFF" opacity="0.04">
+    <!-- generated dots -->
+    <circle cx="120" cy="120" r="2"/><circle cx="220" cy="120" r="2"/><circle cx="320" cy="120" r="2"/>
+    <circle cx="120" cy="220" r="2"/><circle cx="220" cy="220" r="2"/><circle cx="320" cy="220" r="2"/>
+    <circle cx="120" cy="520" r="2"/><circle cx="220" cy="520" r="2"/><circle cx="320" cy="520" r="2"/>
+    <circle cx="120" cy="600" r="2"/><circle cx="220" cy="600" r="2"/><circle cx="320" cy="600" r="2"/>
+  </g>
+
+  <!-- ====== LEFT: Brand ====== -->
+  <g transform="translate(110, 150)">
+    <!-- Brand accent bar -->
+    <rect x="0" y="0" width="64" height="8" rx="4" fill="url(#accent)"/>
+    <!-- Logo mark (rounded square with music note) -->
+    <g transform="translate(0, 44)">
+      <rect width="120" height="120" rx="30" fill="url(#pill)" stroke="#2A3656" stroke-width="1.5"/>
+      <g transform="translate(60,60)" fill="#fff">
+        <!-- simple island glyph -->
+        <rect x="-42" y="-12" width="84" height="24" rx="12" fill="#FF8A4C"/>
+      </g>
+    </g>
+
+    <!-- Title -->
+    <text x="0" y="230" font-size="92" font-weight="800" fill="#FFFFFF" letter-spacing="-2">MyIsland</text>
+    <!-- Subtitle -->
+    <text x="4" y="286" font-size="30" font-weight="500" fill="#9FB2D9">A Dynamic Island for Windows</text>
+
+    <!-- Tech chips -->
+    <g transform="translate(0, 330)" font-size="22" font-weight="600">
+      <g><rect width="118" height="44" rx="22" fill="#1B2440" stroke="#2C3A5E"/><text x="59" y="29" fill="#E6A87B" text-anchor="middle">Rust</text></g>
+      <g transform="translate(132,0)"><rect width="110" height="44" rx="22" fill="#1B2440" stroke="#2C3A5E"/><text x="55" y="29" fill="#9FB2D9" text-anchor="middle">Skia</text></g>
+      <g transform="translate(254,0)"><rect width="150" height="44" rx="22" fill="#1B2440" stroke="#2C3A5E"/><text x="75" y="29" fill="#9FB2D9" text-anchor="middle">Open Source</text></g>
+    </g>
+  </g>
+
+  <!-- ====== RIGHT: Island mock ====== -->
+  <g filter="url(#shadow)">
+    <!-- Island pill -->
+    <rect x="760" y="250" width="380" height="140" rx="70" fill="url(#pill)" stroke="#2A3656" stroke-width="1.5"/>
+    <!-- Album art -->
+    <rect x="790" y="275" width="90" height="90" rx="18" fill="url(#art)"/>
+    <!-- music note on art -->
+    <g transform="translate(835,320)" fill="#FFFFFF" opacity="0.9">
+      <circle cx="-8" cy="8" r="9"/><rect x="-1" y="-16" width="4" height="24" rx="1"/>
+      <circle cx="14" cy="4" r="9"/><rect x="17" y="-20" width="4" height="24" rx="1"/>
+      <path d="M -1 -16 L 21 -20 L 21 -12 L -1 -8 Z"/>
+    </g>
+    <!-- Song title -->
+    <text x="900" y="306" font-size="24" font-weight="700" fill="#FFFFFF">Midnight Drive</text>
+    <text x="900" y="334" font-size="19" fill="#9FB2D9">Neon Skyline</text>
+    <!-- Progress bar -->
+    <rect x="900" y="352" width="200" height="6" rx="3" fill="#2A3656"/>
+    <rect x="900" y="352" width="78" height="6" rx="3" fill="#FF8A4C"/>
+    <!-- Speaker / visualizer bars -->
+    <g transform="translate(1140,290)" fill="#FF8A4C">
+      <rect x="0" y="10" width="5" height="22" rx="2.5"/>
+      <rect x="0" y="42" width="5" height="8" rx="2.5" fill="#FF4C8B"/>
+    </g>
+  </g>
+
+  <!-- ====== Top-right water droplet hint ====== -->
+  <g transform="translate(1150, 150)" opacity="0.9">
+    <path d="M 25 0 C 25 0 50 30 50 48 A 25 25 0 0 1 0 48 C 0 30 25 0 25 0 Z" fill="#4FC3F7" opacity="0.85"/>
+    <circle cx="19" cy="44" r="6" fill="#FFFFFF" opacity="0.6"/>
+  </g>
+
+  <!-- ====== Footer ====== -->
+  <text x="640" y="612" font-size="22" fill="#6B7B9E" text-anchor="middle">github.com/xiaoxiaobaijiangjun/MyIsland</text>
+</svg>
